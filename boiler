@@ -1,0 +1,866 @@
+esphome:
+  name: bojler
+  friendly_name: Bojler
+  project:
+    name: "Jindřich Chládek.Rizeni Vykonu bojleru"
+    version: "03.09.2023"
+
+esp32:
+  board: esp32dev
+  framework:
+    type: arduino
+
+# Enable logging
+logger:
+  level: WARN
+  logs:
+    switch: NONE
+    mqtt.component: WARN
+    mqtt.client: WARN
+    mqtt_subscribe: WARN
+    mqtt.sensor: WARN
+    mqtt.text_sensor: WARN
+    debug: WARN
+
+# Enable Home Assistant API
+api:
+  encryption:
+    key: 
+
+ota:
+  password: ""
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  power_save_mode: LIGHT
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: 
+    password: 
+
+debug:
+  update_interval: 10s
+
+captive_portal:
+
+time:
+  - platform: sntp
+    id: my_time
+
+dallas:
+  pin: GPIO17
+  update_interval: 10s # Potřebujeme rychlý interval aktualizace aby spolehlivě fungoval PID regulátor teploty bojleru
+
+mqtt:
+   broker: 192.168.2.198
+   reboot_timeout: 15min
+   keepalive: 5s
+
+globals:
+   - id: PIDbattVoltOutGlob
+     type: float
+     restore_value: no
+     initial_value: '0'
+     
+   - id: PIDsumOutGlob
+     type: float
+     restore_value: no
+     initial_value: '0'
+
+   - id: PIDoutputPowerOutGlob
+     type: float
+     restore_value: no
+     initial_value: '0'
+
+   - id: PIDtemperatureOutGlob
+     type: float
+     restore_value: no
+     initial_value: '0'
+
+   - id: PIDtemperatureEmgOutGlob
+     type: float
+     restore_value: no
+     initial_value: '0'
+
+sensor:
+  - platform: debug
+    loop_time:
+      name: "Loop Time"
+
+  - platform: uptime
+    id: CasOdZapnuti
+    name: Cas od zapnuti nebo restartu
+
+#  - platform: pulse_counter
+#    pin: GPIO27
+#    unit_of_measurement: 'Hz'
+#    name: 'Frekvence'
+#    filters:
+#      - multiply: 0.0083  # (60s/1000 pulses per kWh)  
+
+  # --- Teplota z čidla Dallas ---
+  - platform: dallas
+    address: 0x7200000017c53a28 # < zde nastavit číslo Dallas čidla
+    id: TeplotaBojler
+    name: "Teplota bojleru"
+    accuracy_decimals: 1
+
+  # Dallas čidlo pokud není připojené, hlásí to v logu toto:
+
+  # [16:00:21][W][dallas.sensor:261]: 'TeplotaTestovaci' - Scratch pad checksum invalid!
+  # [16:00:21][D][sensor:094]: 'TeplotaTestovaci': Sending state nan °C with 2 decimals of accuracy
+
+  # =========================================================================================
+  # WIFi
+  
+  - platform: wifi_signal
+    name: "WiFi Signal"
+    update_interval: 60s
+    id: wifi_signal_db
+    entity_category: "diagnostic"
+      
+  - platform: copy 
+    source_id: wifi_signal_db
+    name: "WiFi Signal procent"
+    filters:
+      - lambda: return min(max(2 * (x + 100.0), 0.0), 100.0);
+    unit_of_measurement: "%"
+    entity_category: "diagnostic"
+  
+  # Zde se počítá hrubý příkon bojeru ve wattech
+  - platform: template
+    name: "Bojler příkon"
+    id: bojler_power
+    unit_of_measurement: "W"
+    device_class: "power"
+    lambda: |-
+      if (id(PIDsumOutGlob) > 0.0)
+         return id(HeatingPowerNom).state * (id(PIDsumOutGlob) * (id(dimmer_bojler).get_max_power() - 0.05) + 0.05);
+      else
+         return 0.0;
+    # return id(HeatingPowerNom).state * (id(PIDsumOutGlob) * (id(dimmer_bojler).get_max_power() - id(dimmer_bojler).get_min_power()) + id(dimmer_bojler).get_min_power());
+    update_interval: 10s
+    accuracy_decimals: 0
+
+  # Test jak se chová čtení min_power
+  - platform: template
+    name: "Bojler dimmer min výkon"
+    id: bojler_dimmer_min_power
+    lambda: |-
+      return id(dimmer_bojler).get_min_power();
+    update_interval: 10s
+    accuracy_decimals: 4
+
+  # Test jak se chová čtení min_power
+  - platform: template
+    name: "Bojler dimmer max výkon"
+    id: bojler_dimmer_max_power
+    lambda: |-
+      return id(dimmer_bojler).get_max_power();
+    update_interval: 10s
+    accuracy_decimals: 4
+
+  #Zde se integruje příkon ve wattech aby se získala spotřeba v kWh
+  - platform: total_daily_energy
+    name: Bojler denni spotreba
+    id: bojler_daily_energy
+    power_id: bojler_power
+    filters:
+      - multiply: 0.001
+    unit_of_measurement: kWh
+    accuracy_decimals: 2
+
+# Diagnostika PID regulátorů
+  - platform: pid
+    climate_id: PIDbattVolt
+    name: "PID napětí baterie výstup"
+    type: COOL
+    entity_category: "diagnostic"
+
+  - platform: pid
+    climate_id: PIDbattVolt
+    name: "PID napětí baterie P"
+    type: PROPORTIONAL
+    entity_category: "diagnostic"
+
+  - platform: pid
+    climate_id: PIDbattVolt
+    name: "PID napětí baterie I"
+    type: INTEGRAL
+    entity_category: "diagnostic"
+
+#-------------------------
+  - platform: pid
+    climate_id: PIDoutputPower
+    name: "PID výstupní výkon výstup"
+    type: HEAT #Zde musí být HEAT
+    entity_category: "diagnostic"
+
+  - platform: pid
+    climate_id: PIDoutputPower
+    name: "PID výstupní výkon P"
+    type: PROPORTIONAL
+    entity_category: "diagnostic"
+
+  - platform: pid
+    climate_id: PIDoutputPower
+    name: "PID výstupní výkon I"
+    type: INTEGRAL
+    entity_category: "diagnostic"
+
+#-------------------------
+  - platform: pid
+    climate_id: PIDtemperature
+    name: "PID teplota výstup"
+    type: HEAT #Zde musí být HEAT
+    entity_category: "diagnostic"
+
+  - platform: pid
+    climate_id: PIDtemperature
+    name: "PID teplota P"
+    type: PROPORTIONAL
+    entity_category: "diagnostic"
+
+  - platform: pid
+    climate_id: PIDtemperature
+    name: "PID teplota I"
+    type: INTEGRAL
+    entity_category: "diagnostic"
+
+#-------------------------
+  - platform: pid
+    climate_id: PIDtemperatureEmg
+    name: "PID teplota nouzová výstup"
+    type: HEAT #Zde musí být HEAT
+    entity_category: "diagnostic"
+
+  - platform: pid
+    climate_id: PIDtemperatureEmg
+    name: "PID teplota nouzová P"
+    type: PROPORTIONAL
+    entity_category: "diagnostic"
+
+  - platform: pid
+    climate_id: PIDtemperatureEmg
+    name: "PID teplota nouzová I"
+    type: INTEGRAL
+    entity_category: "diagnostic"
+
+  # =========================================================================================
+  # MQTT
+
+  - platform: mqtt_subscribe
+    name: "Baterie"
+    id: BaterieSOC
+    topic: solar_assistant/battery_1/state_of_charge/state
+    unit_of_measurement: "%"
+    device_class: "battery"
+    state_class: "measurement"
+    entity_category: "diagnostic"
+    accuracy_decimals: 0
+
+  - platform: mqtt_subscribe
+    name: "Vykon z/do baterie"
+    id: BateriePower
+    topic: solar_assistant/battery_1/power/state
+    unit_of_measurement: "W"
+    device_class: "power"
+    state_class: "measurement"
+    entity_category: "diagnostic"
+    accuracy_decimals: 0
+
+  - platform: mqtt_subscribe
+    name: "PV Napeti"
+    id: PVnapeti
+    topic: solar_assistant/inverter_1/pv_voltage/state
+    unit_of_measurement: "V"
+    device_class: "voltage"
+    state_class: "measurement"
+    entity_category: "diagnostic"
+    accuracy_decimals: 1
+
+  - platform: mqtt_subscribe
+    name: "Napeti baterie"
+    id: BaterieVoltage
+    topic: solar_assistant/battery_1/voltage/state
+    unit_of_measurement: "V"
+    device_class: "voltage"
+    state_class: "measurement"
+    entity_category: "diagnostic"
+    accuracy_decimals: 1
+
+  - platform: mqtt_subscribe
+    name: "Napeti baterie z měniče"
+    id: BaterieVoltageInverter
+    topic: solar_assistant/inverter_1/battery_voltage/state
+    unit_of_measurement: "V"
+    device_class: "voltage"
+    state_class: "measurement"
+    entity_category: "diagnostic"
+    accuracy_decimals: 1
+    filters:
+      heartbeat: 1s
+
+  - platform: mqtt_subscribe
+    name: "Vystupni vykon menice"
+    id: InverterOutput
+    topic: solar_assistant/inverter_1/load_power/state
+    unit_of_measurement: "W"
+    device_class: "power"
+    state_class: "measurement"
+    entity_category: "diagnostic"
+    accuracy_decimals: 0
+
+  - platform: mqtt_subscribe
+    name: "Odběr ze sítě"
+    id: OdberZeSite
+    topic: solar_assistant/inverter_1/grid_power/state
+    unit_of_measurement: "W"
+    device_class: "power"
+    state_class: "measurement"
+    entity_category: "diagnostic"
+    accuracy_decimals: 0
+    
+text_sensor:
+  - platform: mqtt_subscribe
+    name: "Režim měniče"
+    id: InverterRezim
+    topic: solar_assistant/inverter_1/device_mode/state
+
+  - platform: wifi_info
+    ip_address:
+      name: IP Address
+    ssid:
+      name: Connected SSID
+    bssid:
+      name: Connected BSSID
+    mac_address:
+      name: Mac Wifi Address
+    scan_results:
+      name: Latest Scan Results
+    dns_address:
+      name: DNS Address
+
+  - platform: debug
+    reset_reason:
+        name: "Reset Reason"
+
+switch:
+  # =========================================================================================
+  # Ovládání diagnostické modré LEDky
+
+  - platform: gpio
+    pin: 2
+    name: "Status LED"
+    id: Out_StatusLED
+    inverted: False
+    internal: True
+
+  - platform: template
+    name: "Status LED 2"
+    optimistic: yes
+    id: temp_StatusLED
+    internal: True
+    on_turn_on:
+    
+    # <2sec on> <1sec off> <WiFi> <MQTT> <API> <Dallas>
+    #                       ¦      ¦      ¦     ¦
+    #                       ¦      ¦      ¦     +> 0,2sec = Dallas v pořádku
+    #                       ¦      ¦      ¦        0,5sec = Dallas porucha
+    #                       ¦      ¦      +> 0,2sec = API připojené
+    #                       ¦      ¦         0,5sec = API odpojené
+    #                       ¦      +> 0,2sec = MQTT připojené
+    #                       ¦         0,5sec = MQTT odpojené
+    #                       +> 0,2sec = WiFi připojená
+    #                          0,5sec = WiFi odpojená
+    #
+
+    # 2sec dlouhé bliknutí s puzou 1sec značí začátek sekvence
+    - switch.turn_on: Out_StatusLED
+    - delay: 2000ms 
+    - switch.turn_off: Out_StatusLED
+    - delay: 1000ms
+    
+    - if: 
+        condition:
+          wifi.connected:
+        then:
+          # První krátké bliknutí značí že je Wifi připojená
+          - switch.turn_on: Out_StatusLED
+          - delay: 200ms 
+          - switch.turn_off: Out_StatusLED
+          - delay: 500ms
+        else:
+          # První dlouhé bliknutí značí že WiFi není připojená
+          - switch.turn_on: Out_StatusLED
+          - delay: 1000ms 
+          - switch.turn_off: Out_StatusLED
+          - delay: 500ms
+
+    - if: 
+        condition:
+          mqtt.connected:
+        then:
+          # Druhé krátké bliknutí značí že je MQTT připojené
+          - switch.turn_on: Out_StatusLED
+          - delay: 200ms 
+          - switch.turn_off: Out_StatusLED
+          - delay: 500ms
+        else:
+          # Druhé dlouhé bliknutí značí že MQTT není připojené
+          - switch.turn_on: Out_StatusLED
+          - delay: 1000ms 
+          - switch.turn_off: Out_StatusLED
+          - delay: 500ms
+
+    - if: 
+        condition:
+          api.connected:
+        then:
+          # Třetí krátké bliknutí značí že je API připojené
+          - switch.turn_on: Out_StatusLED
+          - delay: 200ms 
+          - switch.turn_off: Out_StatusLED
+          - delay: 500ms
+        else:
+          # Třetí dlouhé bliknutí značí že API není připojené
+          - switch.turn_on: Out_StatusLED
+          - delay: 1000ms 
+          - switch.turn_off: Out_StatusLED
+          - delay: 500ms
+
+    - if: 
+        condition:
+          sensor.in_range:
+            id: TeplotaBojler
+            above: 0
+        then:
+          # Čtvrté krátké bliknutí značí že je Dallas teplotní čidlo OK
+          - switch.turn_on: Out_StatusLED
+          - delay: 200ms 
+          - switch.turn_off: Out_StatusLED
+          - delay: 500ms
+          - logger.log: "Dallas teplotní čidlo OK"
+        else:
+          # Čtvrté dlouhé bliknutí značí že Dallas teplotí čidlo vadné
+          - switch.turn_on: Out_StatusLED
+          - delay: 1000ms 
+          - switch.turn_off: Out_StatusLED
+          - delay: 500ms
+          - logger.log:
+              format: "Dallas porucha teplotního čidla"
+              level: ERROR
+
+    # Na závěr prodleva 2sec
+    - switch.turn_off: Out_StatusLED
+    - delay: 2000ms 
+    - switch.turn_off: temp_StatusLED
+    
+    on_turn_off:
+      - delay: 100ms 
+      - switch.turn_on: temp_StatusLED
+
+# =================================================================================
+# Skript pro následující blok output
+
+script:
+  - id: PIDscript
+    mode: single
+    parameters:
+      VolajiciEntita: int
+    then:
+      - if:
+          condition:
+            and: 
+              - wifi.connected
+              - mqtt.connected
+              - text_sensor.state:
+                  id: InverterRezim
+                  state: 'Solar/Battery'
+          then:
+          - if:
+              condition:
+              - sensor.in_range:
+                  id: TeplotaBojler
+                  above: 0    
+              then:            
+                - output.set_level:
+                    id: dimmer_bojler
+                    level: !lambda |-
+                      id(PIDsumOutGlob) = (id(PIDbattVoltOutGlob) * id(PIDtemperatureOutGlob) * id(PIDoutputPowerOutGlob)) + (id(PIDtemperatureEmgOutGlob) * id(PIDoutputPowerOutGlob));
+                      return id(PIDsumOutGlob);
+              # id(PIDsumOutGlob) = (id(PIDbattVoltOutGlob) * id(PIDbattPowerOutGlob) * id(PIDpvOutGlob) * id(PIDtemperatureOutGlob) * id(PIDoutputPowerOutGlob)) + (id(PIDtemperatureEmgOutGlob) * id(PIDoutputPowerOutGlob));
+                      
+              else:
+                # Pokud bude porucha teplotního čidla, bude se výkon regulovat bez ohledu na teplotu a teplota bude řízena jen termostatem na bojleru
+                - output.set_level:
+                    id: dimmer_bojler
+                    level: !lambda |-
+                      id(PIDsumOutGlob) = (id(PIDbattVoltOutGlob) * id(PIDoutputPowerOutGlob));
+                      return id(PIDsumOutGlob);                
+                # id(PIDsumOutGlob) = (id(PIDbattVoltOutGlob) * id(PIDbattPowerOutGlob) * id(PIDpvOutGlob) * id(PIDoutputPowerOutGlob));
+          else: 
+            # Pro případ že by nebylo spojení WiFi nebo MQTT (nebudou data z měniče), nebo bude režim odběru ze sítě (!Solar/Battery), přejde se hned do nouzového PID režimu
+          - if:
+              condition:
+              - sensor.in_range:
+                  id: TeplotaBojler
+                  above: 0              
+              then:
+                # Pokud bude funkční teplotní čidlo, bude udržována nouzová teplota
+                - output.set_level:
+                    id: dimmer_bojler
+                    level: !lambda |-
+                      id(PIDsumOutGlob) = id(PIDtemperatureEmgOutGlob);
+                      return id(PIDsumOutGlob);            
+              else:
+                # Pokud bude porucha teplotního čidla, bude výstup ac_dimmer nastaven na tvrdo na 50% a teplota bude řízena jen termostatem na bojleru
+                - output.set_level:
+                    id: dimmer_bojler
+                    level: 50%
+
+output:
+  # =========================================================================================
+  #vládání výstupu - osekávání sinusovky
+
+  - platform: ac_dimmer
+    id: dimmer_bojler
+    min_power: 5% # >10% odpovídá cca 2,5% a 52W na výstupu což jsou tepelné ztráty samotného bojleru
+                   # Míň jak 5% způsobuje rušení
+    max_power: 75% # Max power nastavit na max. výkon který může jít z panelů mínus režie měniče cca 100W
+    zero_means_zero: true # Musí být true aby byl při 0% modulaci výkon opravdu 0% (triak se neotevře)
+                          # Při false je při 0% modulaci výkon roven hodnotě v min_power
+    init_with_half_cycle: NO
+    method: leading pulse
+      #trailing
+      #leading pulse (defaultní)
+      #leading
+    gate_pin: 
+      number: GPIO18
+      inverted: no #Zde musí být no, jinak to nefunguje a výstup je zapnutý pořád 
+      mode: 
+        output: True
+        #open_drain: True
+    zero_cross_pin:
+      number: GPIO19
+      mode:
+        input: True
+        #open_drain 
+        pulldown: True
+        pullup: true # Zkouším vliv pullup nebo pulldown 
+      inverted: false #Zde je lepší "no". Pokud je yes, dochází ke flicker efektu
+                   #viz. http://psenyukov.ru/%d0%b4%d0%b8%d0%bc%d0%bc%d0%b5%d1%80-%d0%b2-esphome-%d0%b8-home-assistant-%d0%b8%d0%b7-esp32-%d0%b8-%d0%bc%d0%be%d0%b4%d1%83%d0%bb%d1%8f-%d0%be%d1%82-robotdyn-ac-light-dimmer-module/
+
+# ======================================================================================================
+# Zde je strašné zvěrstvo protože jsem zatím nepřišel na to jak to udělat jinak
+# Výstup PID regulátoru je zapisován do TemplateOutputFloat, odtamtud je přepsán do globální float proměnné a současně pak hned tuto proměnnou v dalším kroku zpracuje 
+# výpočtem s dalšími regulátory a zapíše ji do samotného výstupu (ac_dimmer)
+
+# Výppočet výsledné hodnoty výkonu je dán vzorcem:
+#  
+#   (PIDbattVoltOut * PIDbattPowerOut * PIDpvOut * PIDtemperatureOut) + (PIDtemperatureEmgOut * PIDoutputPowerOut)
+#   
+# > v případě, že bude nadbytek PV energie bude teplota regulovaná na normální teplotu.
+# >  např. výstup z prvního regulátoru (napětí baterie) bude 50% a z ostatních (výkon z baterie a PV napětí) bude 100% a současně regulátor teploty bude na 50%, bude výsledná hodnota 50%*100%*100%*50%=25% 
+#    po chvíli se to ale stabilizuje na hodnotách 100%*100%*100%*25%=25%
+# > Pokud teplota poklesne pod nouzovou, začne to přihřívat za všech okolností ať už z PV/baterie/sítě a výkon bude omezen podle regulátoru "PIDoutputPowerOut" aby nedošlo k přetížení měniče
+
+  - platform: template
+    id: PIDbattVoltOut
+    type: float
+    min_power: 0%
+    max_power: 100%
+    write_action:
+      - globals.set:
+          id: PIDbattVoltOutGlob
+          value: !lambda return state;
+      - script.execute:
+          id: PIDscript
+          VolajiciEntita: 3
+
+  - platform: template
+    id: PIDoutputPowerOut
+    type: float
+    min_power: 0%
+    max_power: 100%
+    write_action:
+      - globals.set:
+          id: PIDoutputPowerOutGlob
+          value: !lambda return state;
+      - script.execute:
+          id: PIDscript
+          VolajiciEntita: 4
+
+  - platform: template
+    id: PIDtemperatureOut
+    type: float
+    min_power: 0%
+    max_power: 100%
+    write_action:
+      - globals.set:
+          id: PIDtemperatureOutGlob
+          value: !lambda return state;
+      - script.execute:
+          id: PIDscript
+          VolajiciEntita: 5
+
+  - platform: template
+    id: PIDtemperatureEmgOut
+    type: float
+    min_power: 0%
+    max_power: 100%
+    write_action:
+      - globals.set:
+          id: PIDtemperatureEmgOutGlob
+          value: !lambda return state;
+      - script.execute:
+          id: PIDscript
+          VolajiciEntita: 6
+
+number:
+  # =========================================================================================
+  # PID nastavení pro napětí baterie
+  - platform: template
+    name: "PID kp Baterie napětí"
+    id: pid_kp_batt_volt
+    optimistic: true
+    min_value: 0
+    max_value: 0.5
+    step: 0.00005
+    restore_value: True
+    initial_value: 0.0001
+
+  - platform: template
+    name: "PID ki Baterie napětí"
+    id: pid_ki_batt_volt
+    optimistic: true
+    min_value: 0
+    max_value: 0.5
+    step: 0.00005
+    restore_value: True
+    initial_value: 0.0005
+
+  # PID nastavení pro regulaci výkonu
+  - platform: template
+    name: "PID kp Výstupní výkon"
+    id: pid_kp_out_power
+    optimistic: true
+    min_value: 0
+    max_value: 0.5
+    step: 0.00005
+    restore_value: True
+    initial_value: 0.0001
+
+  - platform: template
+    name: "PID ki Výstupní výkon"
+    id: pid_ki_out_power
+    optimistic: true
+    min_value: 0
+    max_value: 0.5
+    step: 0.00005
+    restore_value: True
+    initial_value: 0.0005
+
+  # PID nastavení pro regulaci teploty (společné pro Temperature a TemparatureEmg)
+  - platform: template
+    name: "PID kp Temperature"
+    id: pid_kp_temperature
+    optimistic: true
+    min_value: 0
+    max_value: 0.5
+    step: 0.0001
+    restore_value: True
+    initial_value: 0.001
+
+  - platform: template
+    name: "PID ki Temperature"
+    id: pid_ki_temperature
+    optimistic: true
+    min_value: 0
+    max_value: 0.5
+    step: 0.0001
+    restore_value: True
+    initial_value: 0.005
+
+# Nastavení pro nouzový ohřev
+  - platform: template
+    name: "Nouzový ohřev výkon"
+    id: EmergencyHeatingPower
+    optimistic: true
+    min_value: 0
+    max_value: 1
+    step: 0.01
+    restore_value: True
+    initial_value: 0.5
+
+# Nastavení parametrů topného tělesa
+  - platform: template
+    name: "Příkon topného tělesa"
+    id: HeatingPowerNom
+    optimistic: true
+    min_value: 0
+    max_value: 5000
+    step: 100
+    restore_value: True
+    initial_value: 2000
+    unit_of_measurement: W
+
+# =========================================================================================
+# ---------- PID regulátory
+# =========================================================================================
+
+climate:
+# --- PID napětí baterie ---
+#     Nejjednodušší a nejspolehlivější regulace přebytků. Ideálně nastavit -0,1V pod float napětí
+#     Nevýhoda: nemusí být pak dosaženo bulk fáze nabíjení
+
+   - platform: pid
+     visual:
+       min_temperature: 0
+       max_temperature: 60
+       temperature_step: 0.1
+     name: "PID řízení výkonu bojleru podle napětí baterie"
+     id: PIDbattVolt
+     sensor: BaterieVoltageInverter  
+       # BaterieVoltageInverter je napětí měřené měničem
+       # BaterieVoltage je napětí měřené Victron SmartShunt
+     default_target_temperature: 27.1
+     cool_output: PIDbattVoltOut
+     control_parameters:
+       kp: 0.02
+       ki: 0.01
+       kd: 0
+       # output_averaging_samples: 5      # smooth the output over 5 samples
+       # derivative_averaging_samples: 10  # smooth the derivative value over 10 samples
+       output_averaging_samples: 1
+       max_integral: 0
+
+# --- PID výstupní výkon ---
+#     Regulace podle výstupního výkonu měniče. Pokud by došlo k sepnutí jiného výkonového spotřebiče
+#     (např. mikrovlnka, vysavač, ...), tento regulátor zajistí snížení odběru bojleru aby nedošlo k přetížení
+   - platform: pid
+     visual:
+       min_temperature: 0
+       max_temperature: 3000
+       temperature_step: 100
+     name: "PID řízení výkonu bojleru podle výstupního výkonu měniče"
+     id: PIDoutputPower
+     sensor: InverterOutput
+     default_target_temperature: 1000
+     heat_output: PIDoutputPowerOut  # Zde musí být heat_output na rozdíl od ostatních regulátorů
+     control_parameters:
+       kp: 0.00001
+       ki: 0.00005
+       kd: 0
+       # output_averaging_samples: 5      # smooth the output over 5 samples
+       # derivative_averaging_samples: 10  # smooth the derivative value over 10 samples
+       output_averaging_samples: 1
+       min_integral: 0 # Zde musí být min_integral na rozdíl od ostatních regulátorů
+
+# --- PID teplota ---
+#     Na tuto teplotu se bude regulovat když bude dostatek PV energie
+   - platform: pid
+     visual:
+       min_temperature: 20
+       max_temperature: 70
+       temperature_step:
+         target_temperature: 1
+         current_temperature: 0.01
+     name: "PID řízení výkonu bojleru podle teploty"
+     id: PIDtemperature
+     sensor: TeplotaBojler # <<< Změnit na DALLS vstup
+     default_target_temperature: 60
+     heat_output: PIDtemperatureOut  # Zde musí být heat_output na rozdíl od ostatních regulátorů
+     control_parameters:
+       kp: 0.1
+       ki: 0.01
+       kd: 0
+       # output_averaging_samples: 5      # smooth the output over 5 samples
+       # derivative_averaging_samples: 10  # smooth the derivative value over 10 samples
+       output_averaging_samples: 1
+       min_integral: 0 # Zde musí být min_integral na rozdíl od ostatních regulátorů
+
+# --- PID teplota nouzová ---
+#     Minimální teplota která bude regulovaná za všech podmínek
+   - platform: pid
+     visual:
+       min_temperature: 20
+       max_temperature: 70
+       temperature_step:
+         target_temperature: 1
+         current_temperature: 0.01
+     name: "PID řízení výkonu bojleru podle teploty (minimum)"
+     id: PIDtemperatureEmg
+     sensor: TeplotaBojler # <<< Změnit na DALLS vstup
+     default_target_temperature: 40
+     heat_output: PIDtemperatureEmgOut  # Zde musí být heat_output na rozdíl od ostatních regulátorů
+     control_parameters:
+       kp: 0.1
+       ki: 0.01
+       kd: 0
+       # output_averaging_samples: 5      # smooth the output over 5 samples
+       # derivative_averaging_samples: 10  # smooth the derivative value over 10 samples
+       output_averaging_samples: 1
+       min_integral: 0 # Zde musí být min_integral na rozdíl od ostatních regulátorů
+
+button:
+  # =========================================================================================
+  # Tlačítka pro spuštění automatického ladění
+  - platform: template
+    name: "PID Autotune BattVolt"
+    on_press:
+      - climate.pid.autotune: PIDbattVolt
+
+  - platform: template
+    name: "PID Autotune OutputPower"
+    on_press:
+      - climate.pid.autotune: PIDoutputPower
+
+  - platform: template
+    name: "PID Autotune Temperature"
+    on_press:
+      - climate.pid.autotune: PIDtemperature
+
+  - platform: template
+    name: "PID Autotune TemperatureEmg"
+    on_press:
+      - climate.pid.autotune: PIDtemperatureEmg
+
+  # Tlačíka pro zápis nových hodnot PID
+  - platform: template
+    name: "Nastav P-I-D BattVolt"
+    on_press:
+      - climate.pid.set_control_parameters:
+         id: PIDbattVolt
+         kp: !lambda return id(pid_kp_batt_volt).state;
+         ki: !lambda return id(pid_ki_batt_volt).state;
+         kd: 0.0
+
+  - platform: template
+    name: "Nastav P-I-D OutputPower"
+    on_press:
+      - climate.pid.set_control_parameters:
+         id: PIDoutputPower
+         kp: !lambda return id(pid_kp_out_power).state;
+         ki: !lambda return id(pid_ki_out_power).state;
+         kd: 0.0
+
+  - platform: template
+    name: "Nastav P-I-D Temperature"
+    on_press:
+      - climate.pid.set_control_parameters:
+         id: PIDtemperature
+         kp: !lambda return id(pid_kp_temperature).state;
+         ki: !lambda return id(pid_ki_temperature).state;
+         kd: 0.0
+
+  - platform: template
+    name: "Nastav P-I-D TemperatureEmg"
+    on_press:
+      - climate.pid.set_control_parameters:
+         id: PIDtemperatureEmg
+         kp: !lambda return id(pid_kp_temperature).state;
+         ki: !lambda return id(pid_ki_temperature).state;
+         kd: 0.0
+
